@@ -1,0 +1,20 @@
+{
+  "name": "simulation-import",
+  "version": "0.0.1",
+  "description": "Run simulation on imported data",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bluebird": "^3.5.0",
+    "commander": "^2.9.0",
+    "knex": "^0.12.9",
+    "lodash": "^4.17.4",
+    "moment": "^2.18.1",
+    "pg": "^6.1.5",
+    "winston": "^2.3.1"
+  }
+}
