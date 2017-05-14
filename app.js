@@ -3,75 +3,27 @@
 const app = require('commander'),
     config = require('./config/local'),
     db = require('./lib/db'),
+    logger = require('./lib/logger'),
+    _ = require('lodash'),
     dateUtils = require('./lib/date-utils'),
     promise = require('bluebird'),
     analyse = require('./lib/analyse'),
-    layPrice = 1.6,
-    liabilityPercent = 0.5;
+    layPrice = 1.56,
+    liabilityPercent = 1.00;
 
-const excludeRunners = [-1,
-        2, 3, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 40
-    ],
-    excludeCourses = ["'dummy'",
-        "'ChelmC'",
-        "'Salis'",
-        "'Catt'",
-        "'Ling'",
-        "'Ponte'",
-        "'Ripon'",
-        "'Hunt'",
-        "'Folk'",
-        "'Brig'",
-        "'Here'",
-        "'Ayr'",
-        "'Yarm'",
-        "'Wind'",
-        "'Hex'",
-        "'Wolv'",
-        "'Taun'",
-        "'Ham'"
-    ],
-    excludeDistances = ["'dummy'",
-        "'4m1f'",
-        "'4m2f'",
-        "'4m'",
-        "'5f'",
-        "'6f'",
-        "'7f'"
-    ],
-    excludeMonths = [-1],
-    excludeDays = [-1],
-    excludeClasses = ["'dummy'",
-        "'Juv Hcap Hrd'",
-        "'PA'",
-        "'Grd1 Juv Hrd'",
-        "'Listed Nov Chs'",
-        "'Grd2 Juv Hrd'",
-        "'Charity Race'",
-        "'Grd1 Nov Hrd'",
-        "'PA Grp1'",
-        "'Listed Hcap Hrd'",
-        "'Hrd'",
-        "'Grd1 Hrd'",
-        "'Int Hrd'",
-        "'Grd1 Chs'",
-        "'Grd1 Nov Chs'",
-        "'Grp1'",
-        "'Listed Juv Hrd'",
-        "'Mdn NHF'",
-        "'App Hcap'",
-        "'Listed NHF'",
-        "'Grp 2'",
-        "'Nov Hrd'",
-        "'Grp3'",
-        "'Cond Stks'",
-        "'Grp2'",
-        "'Nov Chs'",
-        "'Grd2 Hrd'",
-        "'Claim Stks'"
-    ];
+const runnerScores = [];
 
-let balance = 1000.00;
+const distanceScores = [];
+
+const venueScores = [];
+
+const dayScores = [];
+
+const raceClassScores = [];
+
+const hourScores = [];
+
+let balance = 1000;
 
 app
     .option('-r, --run', 'Run Simulation')
@@ -81,13 +33,12 @@ app
 if (app.analyse) {
     return promise.coroutine(function*() {
 
-        yield analyse.analyseData(layPrice, excludeCourses, excludeMonths, excludeDistances, excludeRunners, excludeDays, excludeClasses);
+        yield analyse.analyseData(layPrice);
         db.destroy();
     })();
 } else {
-    db.knex.raw('select distinct event_id, country, actual_off, course, distance, event from horse_racing_race order by actual_off')
+    db.knex.raw(`select distinct event_id, country, actual_off, course, distance, event from horse_racing_race where actual_off >= '2016-01-01' and actual_off < '2017-01-01' order by actual_off`)
         .then(function(races) {
-            //console.log(races.rows);
 
             return promise.coroutine(function*() {
                 for (let race of races.rows) {
@@ -103,54 +54,93 @@ let lastDateString = '';
 
 const processRace = function(race) {
     return promise.coroutine(function*() {
-        //console.log(race);
 
-        const maxLiability = (balance * (liabilityPercent / 100)).toFixed(2),
+        let maxLiability = (balance * (liabilityPercent / 100)).toFixed(2),
             stake = (maxLiability / (layPrice - 1)).toFixed(2);
 
-        /*const maxLiability = 3.00,
-            stake = 5.00;*/
+        if (stake < 2.00) {
+            stake = 2.00;
+            maxLiability = (stake * (layPrice - 1)).toFixed(2);
+        }
 
+        //stake = 10.00;
+        //maxLiability = 5.60;
+
+        race.venue = getVenueFromCourse(race.course);
         race.race_class = race.event.substr(race.event.indexOf(' ') + 1);
 
-        const runners = yield db.knex.raw(`select distinct selection_id from horse_racing_race where event_id = ${race.event_id}`),
+        const runners = yield db.knex.raw(`select distinct selection_id, selection, win_flag from horse_racing_race where event_id = ${race.event_id}`),
+            spBetting = yield db.knex.raw(`select sum(pre_total_matched) as pre_total_matched, sum(pre_total_bets) as pre_total_bets from horse_racing_race where event_id = ${race.event_id}`),
             numberOfRunners = runners.rows.length,
             matches = yield db.knex.raw(`select distinct selection_id from horse_racing where event_id = ${race.event_id} and in_play = 'IP' and odds <= ${layPrice}`);
 
-        for (let runner of runners.rows) {
-            const sp = yield db.knex.raw(`select selection_id, odds from horse_racing where event_id = ${race.event_id} and selection_id = ${runner.selection_id} and in_play = 'PE' order by latest_taken desc limit 1`);
-            //console.log(sp.rows);
-            const minInPlay = yield db.knex.raw(`select selection_id, min(odds), win_flag from horse_racing where event_id = ${race.event_id} and selection_id = ${runner.selection_id} and in_play = 'IP' group by event_id, selection_id, win_flag`);
-            //console.log(minInPlay.rows);
 
-            runner.sp = sp.rows[0] ? sp.rows[0].odds : null;
+        for (let runner of runners.rows) {
+            const sp = yield db.knex.raw(`select selection_id, odds from horse_racing where event_id = ${race.event_id} and selection_id = ${runner.selection_id} and in_play = 'PE' order by latest_taken desc, odds desc limit 1`);
+            const minInPlay = yield db.knex.raw(`select selection_id, min(odds), win_flag from horse_racing where event_id = ${race.event_id} and selection_id = ${runner.selection_id} and in_play = 'IP' group by event_id, selection_id, win_flag`);
+
+            runner.sp = sp.rows[0] ? parseFloat(sp.rows[0].odds) : null;
 
             if (minInPlay.rows[0]) {
                 runner.min_in_play = minInPlay.rows[0].min;
             }
-
-            yield db.knex.raw(`delete from horse_racing_runner where event_id = ${race.event_id} and selection_id = ${runner.selection_id};`);
-            yield db.knex.raw(`insert into horse_racing_runner (event_id, country, course, distance, race_class, runners, selection_id, sp_odds, min_in_play_odds, actual_off, created_at) select ${race.event_id}, '${race.country}', '${race.course}', '${race.distance}', '${race.race_class}', ${numberOfRunners}, ${runner.selection_id}, ${runner.sp}, ${runner.min_in_play || null}, '${dateUtils.formatPGDateTime(new Date(race.actual_off))}', now();`);
-
-            //console.log(runner);
         }
 
-        //console.log(numberOfRunners);
-        //console.log(matches.rows.length);
+        const favourite = _.minBy(runners.rows, 'sp'),
+            runnersWithoutFavourite = _.omitBy(runners.rows, function(check) {
+                return check.selection_id === favourite ? favourite.selection_id : undefined;
+            }),
+            secondFavourite = _.minBy(_.values(runnersWithoutFavourite), 'sp');
+
+        let favSecFavRatio = null;
+
+        if (favourite && secondFavourite) {
+            favSecFavRatio = (secondFavourite.sp / favourite.sp).toFixed(2);
+        }
+
+        for (let runner of runners.rows) {
+            //yield db.knex.raw(`delete from horse_racing_runner where event_id = ${race.event_id} and selection_id = ${runner.selection_id};`);
+            //yield db.knex.raw(`insert into horse_racing_runner (event_id, country, course, venue, distance, race_class, runners, selection_id, selection, win_flag, sp_odds, min_in_play_odds, actual_off, created_at, race_pre_total_matched, race_pre_total_bets, fav_sp_odds, sec_fav_sp_odds, fav_sec_fav_ratio) select ${race.event_id}, '${race.country}', '${race.course}', ${race.venue}, '${race.distance}', '${race.race_class}', ${numberOfRunners}, ${runner.selection_id}, '${runner.selection}', ${runner.win_flag}, ${runner.sp}, ${runner.min_in_play || null}, '${dateUtils.formatPGDateTime(new Date(race.actual_off))}', now(), ${spBetting.rows[0].pre_total_matched}, ${spBetting.rows[0].pre_total_bets}, ${favourite ? favourite.sp : null}, ${secondFavourite ? secondFavourite.sp : null}, ${favSecFavRatio};`);
+        }
 
         const theDate = new Date(race.actual_off);
 
-        if ((excludeClasses.indexOf(`'${race.race_class}'`) === -1) && (excludeDays.indexOf(theDate.getDay()) === -1) && (excludeMonths.indexOf(theDate.getMonth() + 1) === -1) && (excludeRunners.indexOf(numberOfRunners) === -1) && (excludeDistances.indexOf(`'${race.distance}'`) === -1) && (excludeCourses.indexOf(`'${race.course}'`) === -1)) {
-            //console.log(numberOfRunners + ' ' + race.course);
+        const runnerScore = _.find(runnerScores, {
+            runners: numberOfRunners
+        });
 
-            /*            console.log('');
-                        console.log(`matches ${matches.rows.length}`);
-                        console.log(`blance ${balance}`);
-                        console.log(`liability ${maxLiability}`);
-                        console.log(`stake ${stake}`);
-            */
+        const distanceScore = _.find(distanceScores, {
+            distance: race.distance
+        });
+
+        const venueScore = _.find(venueScores, {
+            venue: race.venue.replace(/'/g, "")
+        });
+
+        const dayScore = _.find(dayScores, {
+            day: new Date(race.actual_off).getDay()
+        });
+
+        const raceClassScore = _.find(raceClassScores, {
+            race_class: race.race_class.replace(/'/g, "")
+        });
+
+        const hourScore = _.find(hourScores, {
+            hour: new Date(race.actual_off).getHours()
+        });
+
+        let totalScore;
+
+        if (raceClassScore) {
+            totalScore = ((hourScore.matches + runnerScore.matches + distanceScore.matches + venueScore.matches + dayScore.matches + raceClassScore.matches) / 6.00);
+        } else {
+            totalScore = ((hourScore.matches + runnerScore.matches + distanceScore.matches + venueScore.matches + dayScore.matches) / 5.00);
+        }
+
+        if ((favourite && favourite.sp && favourite.sp > layPrice + 0.08) && totalScore >= (layPrice - 0.0023)) {
+
             if (matches.rows.length === 1) {
-                balance = balance - maxLiability;
+                balance = parseFloat((balance - maxLiability).toFixed(2));
             } else if (matches.rows.length > 1) {
                 let profit = (stake * (matches.rows.length - 1));
 
@@ -162,21 +152,10 @@ const processRace = function(race) {
 
                 balance = balance + profit;
                 balance = parseFloat(balance.toFixed(2));
-
-                //console.log(`profit ${profit}`);
             }
-
-            if (matches.rows > 2) {
-                console.log(race.event_id);
-            }
-
-
-            //console.log(`end balance ${balance}`);
-
 
             const dateString = ("0" + theDate.getDate()).slice(-2) + "-" + ("0" + (theDate.getMonth() + 1)).slice(-2) + "-" + theDate.getFullYear();
 
-            //console.log(theDate);
             if (lastDateString !== dateString) {
                 console.log(`${balance.toFixed(2)}, ${dateString}`);
                 lastDateString = dateString;
@@ -185,4 +164,134 @@ const processRace = function(race) {
 
         return;
     })();
+}
+
+const getVenueFromCourse = function(course) {
+    switch (course) {
+        case 'Aint':
+            return "'Aintree'";
+        case 'Ascot':
+            return "'Ascot'";
+        case 'Ayr':
+            return "'Ayr'";
+        case 'Bang':
+            return "'Bangor'";
+        case 'Bath':
+            return "'Bath'";
+        case 'Bev':
+            return "'Beverley'";
+        case 'Brig':
+            return "'Brighton'";
+        case 'Carl':
+            return "'Carlisle'";
+        case 'Cart':
+            return "'Cartmel'";
+        case 'Catt':
+            return "'Catterick'";
+        case 'Chelt':
+            return "'Cheltenham'";
+        case 'ChelmC':
+            return "'Chelmsford City'";
+        case 'Chep':
+            return "'Chepstow'";
+        case 'Chest':
+            return "'Chester'";
+        case 'Donc':
+            return "'Doncaster'";
+        case 'Epsm':
+            return "'Epsom'";
+        case 'Extr':
+            return "'Exeter'";
+        case 'Fake':
+            return "'Fakenham'";
+        case 'FfosL':
+            return "'Ffos Las'";
+        case 'Folk':
+            return "'Folkstone'";
+        case 'Font':
+            return "'Fontwell'";
+        case 'Good':
+            return "'Goodwood'";
+        case 'Ham':
+            return "'Hamilton'";
+        case 'Hayd':
+            return "'Haydock'";
+        case 'Here':
+            return "'Hereford'";
+        case 'Hex':
+            return "'Hexham'";
+        case 'Hunt':
+            return "'Huntingdon'";
+        case 'Kelso':
+            return "'Kelso'";
+        case 'Kemp':
+            return "'Kempton'";
+        case 'Leic':
+            return "'Leicester'";
+        case 'Ling':
+            return "'Lingfield'";
+        case 'Ludl':
+            return "'Ludlow'";
+        case 'MrktR':
+            return "'Market Rasen'";
+        case 'Muss':
+            return "'Musselburgh'";
+        case 'Newb':
+            return "'Newbury'";
+        case 'Newc':
+            return "'Newcastle'";
+        case 'Newm':
+            return "'Newmarket'";
+        case 'Newt':
+            return "'Newton Abbot'";
+        case 'Nott':
+            return "'Nottingham'";
+        case 'Perth':
+            return "'Perth'";
+        case 'Plump':
+            return "'Plumpton'";
+        case 'Ponte':
+            return "'Pontefract'";
+        case 'Redc':
+            return "'Redcar'";
+        case 'Ripon':
+            return "'Ripon'";
+        case 'Salis':
+            return "'Salisbury'";
+        case 'Sand':
+            return "'Sandown'";
+        case 'Sedge':
+            return "'Sedgefield'";
+        case 'Sthl':
+            return "'Southwell'";
+        case 'Strat':
+            return "'Stratford'";
+        case 'Taun':
+            return "'Taunton'";
+        case 'Thirsk':
+            return "'Thirsk'";
+        case 'Towc':
+            return "'Towcester'";
+        case 'Uttox':
+            return "'Uttoxeter'";
+        case 'Warw':
+            return "'Warwick'";
+        case 'Weth':
+            return "'Wetherby'";
+        case 'Winc':
+            return "'Wincanton'";
+        case 'Wind':
+            return "'Windsor'";
+        case 'Wolv':
+            return "'Wolverhampton'";
+        case 'Worc':
+            return "'Worcester'";
+        case 'Yarm':
+            return "'Yarmouth'";
+        case 'York':
+            return "'York'";
+        default:
+            logger.log('Unable to determine venue from course: ' + course, 'error');
+            return null;
+    }
 }
